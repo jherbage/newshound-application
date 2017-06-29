@@ -52,7 +52,7 @@ def handler(event, context):
 	if 'TIMEPERIOD' in event:
 		TIMEPERIOD=event['TIMEPERIOD']	
 		
-	news_items=dynamodb.Table(event['news_items_tablename'])	
+	news_items=dynamodb.Table(os.environ['news_items_tablename'])	
 	# We need to exit whatever happens so wrap in try
 	try:	
 		results = news_items.scan(

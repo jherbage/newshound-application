@@ -21,6 +21,6 @@ whatshot.py returns a json object of things and counts of the number of times th
 
 The 2 lambda functions created for these scripts are expected to form the backend processing for the newshound application. An API gateway ma be used to front the whatshot app and the an AWS event rule used to periodically trigger the newshound application to update the stored data.
 
-Seperate repositories will store the implementation instructions for this source code.
+The CF template can be fed to CloudFormation as a stack. Its only input is a neworg API key easily obtained from newsapi.org. Its one interesting feature is a bootstrap lambda whose only purpose is to allow Newshound lambda to be built from a repository rather than relying on holding the code permanently in an S3 bucket. Its a good example of a work around allowing continuous integration to work with lambda. Hopefully at some point AWS will support lambda being built direct from repositories.
   
 

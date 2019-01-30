@@ -62,7 +62,10 @@ def handler(event, context):
 		response={}
 		for result in results:
 			if hasattr(response, result['newsitem'].encode('utf-8')):
-				response[result['newsitem'].encode('utf-8')] = response[result['newsitem'].encode('utf-8')] + result['tally']
+				try:
+					response[result['newsitem'].encode('utf-8')] = response[result['newsitem'].encode('utf-8')] + result['tally']
+				except Exception as e:
+					i=1
 			else:
 				response[result['newsitem'].encode('utf-8')] = result['tally']
 		# remove anything with a count of 1

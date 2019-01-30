@@ -131,5 +131,3 @@ def handler(event, context):
 	except Exception as e:
 		print "exception in newshound: "+str(e)
 
-		
-handler({"newsApiKey": "510eb9cfaf384d928641d146894d7821"},{})	

@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Infrastructure Continuous Delivery for newshound
+Outputs:
+  WhatsHotUrl:
+    Description: The url to post queries to the whatshot api
+    Value: !Join ['', [ 'https://', !Ref WhatsHotApi, '.execute-api.', !Ref 'AWS::Region', '.amazonaws.com/v1/whatshot']]
+Parameters: 
+  NewsApiKey: 
+    Type: String
+    Description: Enter a valid News API key.
+Resources:
+  CFNRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal: {Service: [cloudformation.amazonaws.com]}
+        Version: '2012-10-17'
+      Path: /
+      ManagedPolicyArns:
+      # TODO grant least privilege to only allow managing your CloudFormation stack resources
+      - "arn:aws:iam::aws:policy/AdministratorAccess"
+  # Dynamodb tables
+  RunHistoryTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+      - 
+        AttributeName: starttime
+        AttributeType: S		
+      KeySchema:
+      - 
+        AttributeName: starttime
+        KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  NewsUrlTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: url
+        AttributeType: S
+      - AttributeName: country
+        AttributeType: S		
+      KeySchema:
+      - AttributeName: url
+        KeyType: HASH
+      - AttributeName: country
+        KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  NewsItemsTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: newsitem
+        AttributeType: S
+      - AttributeName: url
+        AttributeType: S		
+      KeySchema:
+      - AttributeName: newsitem
+        KeyType: HASH
+      - AttributeName: url
+        KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  # Temporary bucket where the zip files for the lambda functions will be created
+  TempS3Bucket:
+    Type: AWS::S3::Bucket
+  # Lambda function to pull down the resources for the newshound and whatshot lambda functions and zip them into TempS3Bucket
+  S3UploadObject:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Extracts and uploads newshound and whatshot functions code to zipfile in S3.
+      MemorySize: 512
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          import urllib2
+          import bz2
+          from bz2 import decompress
+          import tarfile
+          import zipfile
+          import os
+          import base64
+          import shutil
+          from urllib2 import urlopen, URLError, HTTPError
+          import boto3
+          def dlfile(url):
+            # Open the url
+            try:
+              f = urlopen(url)
+              print "downloading " + url
+              # Open our local file for writing
+              with open(os.path.basename(url), "wb") as local_file: 
+                local_file.write(f.read())
+          
+              #handle errors
+            except HTTPError, e:
+              print "HTTP Error:", e.code, url
+            except URLError, e:
+              print "URL Error:", e.reason, url
+          
+          def handler(event, context):
+            if event['RequestType'] == 'Create':
+              os.chdir('/tmp')
+              #  Download newshound.py and whatshot.py to pwd from github
+              dlfile('https://raw.github.com/jherbage/newshound-application/master/newshound.py')
+              dlfile('https://raw.github.com/jherbage/newshound-application/master/whatshot.py')
+              # Zip the function lib contents and encode them ready to upload
+              if not os.path.exists('lambda-function'):
+                os.makedirs('lambda-function')
+              else:
+                shutil.rmtree('lambda-function')
+                os.makedirs('lambda-function')  
+              shutil.copy2('newshound.py', 'lambda-function/newshound.py')
+             
+              # Zip the function lib contents and encode them ready to upload
+              if not os.path.exists('lambda-api-function'):
+                os.makedirs('lambda-api-function')
+              else:
+                shutil.rmtree('lambda-api-function')
+                os.makedirs('lambda-api-function')  
+              shutil.copy2('whatshot.py', 'lambda-api-function/whatshot.py')
+            
+          
+              if not os.path.isfile('phantomjs-1.9.8-linux-x86_64.tar.bz2'): 
+                dlfile('https://bitbucket.org/ariya/phantomjs/downloads/phantomjs-1.9.8-linux-x86_64.tar.bz2')
+          
+              tar = tarfile.open("phantomjs-1.9.8-linux-x86_64.tar.bz2")
+              os.chdir('lambda-function')
+              tar.extractall()
+              tar.close()	
+              os.chdir('..')
+            
+              # Get the extra python stuff for zip from githuh
+              dlfile('https://raw.github.com/jherbage/newshound-application/master/newshound-pylibs.tar.gz')
+              tar = tarfile.open("newshound-pylibs.tar.gz")
+              os.chdir('lambda-function')
+              tar.extractall()
+              tar.close()	
+              os.chdir('..')
+          
+              # Zip the functions update
+              os.chdir('lambda-function')
+              zf = zipfile.ZipFile("../newshound.zip", "w")
+              for dirname, subdirs, files in os.walk("."):
+                zf.write(dirname)
+                for filename in files:
+                  zf.write(os.path.join(dirname, filename))
+              zf.close()
+              os.chdir('..')
+            
+              # Zip the functions update
+              os.chdir('lambda-api-function')
+              zf = zipfile.ZipFile("../whatshot.zip", "w")
+              for dirname, subdirs, files in os.walk("."):
+                zf.write(dirname)
+                for filename in files:
+                  zf.write(os.path.join(dirname, filename))
+              zf.close()
+              os.chdir('..')
+            
+              # Upload both zip files to S3 bucket
+              print event['ResourceProperties']
+              s3client = boto3.client('s3', region_name=event['ResourceProperties']['Region'])
+              # Gte the bucket name from the ARN
+              temp_bucket_name=event['ResourceProperties']['temp_bucket'].replace('arn:aws:s3:::','')
+              s3client.upload_file('./newshound.zip', temp_bucket_name, 'newshound.zip')		
+              s3client.upload_file('./whatshot.zip', temp_bucket_name, 'whatshot.zip')				
+            responseData = {}
+            if event['RequestType'] == 'Create':
+              responseData['bucket_name'] = temp_bucket_name
+            else:
+              responseData['bucket_name'] = 'na'
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+      Timeout: 300
+      Runtime: python2.7
+  # Lambda function to empty TempS3Bucket so it can be deleted as part of the rollback
+  S3EmptyBucket:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Empties S3 bucket.
+      MemorySize: 128
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            if event['RequestType'] == 'Create':  		  
+              s3client = boto3.client('s3', region_name=event['ResourceProperties']['Region'])
+              # Gte the bucket name from the ARN
+              bucket_name=event['ResourceProperties']['BucketArn'].replace('arn:aws:s3:::','')
+              list=s3client.list_objects_v2(Bucket=bucket_name)
+              for objectKey in list['Contents']:
+                s3client.delete_objects(
+                  Bucket=bucket_name,
+                  Delete={
+                    'Objects': [
+                      {"Key": objectKey['Key']}
+                               ]
+                  }
+                )
+              s3client.delete_bucket(Bucket=bucket_name)			
+            responseData = {}
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+      Timeout: 30
+      Runtime: python2.7
+# Needed for cloudwatch event to trigger lambda function
+  PermissionForEventsToInvokeLambda: 
+    Type: "AWS::Lambda::Permission"
+    Properties: 
+      FunctionName: !Ref NewshoundFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NewshoundEventRule.Arn
+  # This is the role that the S3UploadObject lambda function will have over AWS - needs minimum of logging and S3 upload
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName: DBPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'dynamodb:*'
+              Resource: 
+                - !Join ['', [ 'arn:aws:dynamodb:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':table/', !Ref NewsItemsTable ]]
+                - !Join ['', [ 'arn:aws:dynamodb:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':table/', !Ref RunHistoryTable ]]
+                - !Join ['', [ 'arn:aws:dynamodb:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':table/', !Ref NewsUrlTable ]]
+      - PolicyName: S3Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:*'
+              Resource: 
+                - !Join ['', [!GetAtt TempS3Bucket.Arn, '/*']]
+                - !GetAtt TempS3Bucket.Arn
+      - PolicyName: lambdalogtocloudwatch
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogGroup'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: 'arn:aws:logs:*:*:*'  
+  CreateZipFiles:
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt S3UploadObject.Arn
+      Region: !Ref "AWS::Region"
+      temp_bucket: !GetAtt TempS3Bucket.Arn
+  NewshoundFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Scrapes the newsapi for stuff in the news and populates a database with the info returned
+      MemorySize: 512
+      Handler: newshound.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !GetAtt CreateZipFiles.bucket_name
+        S3Key: newshound.zip
+      Timeout: 900
+      Runtime: python2.7
+    DependsOn: CreateZipFiles
+  WhatshotFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Reports on data collected by newshound
+      MemorySize: 128
+      Handler: whatshot.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !GetAtt CreateZipFiles.bucket_name
+        S3Key: whatshot.zip
+      Timeout: 20
+      Runtime: python2.7
+      Environment:
+        Variables:
+          news_items_tablename: !Ref NewsItemsTable
+    DependsOn: CreateZipFiles
+  DeleteTempBucket:
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt S3EmptyBucket.Arn
+      Region: !Ref "AWS::Region"
+      BucketArn: !GetAtt TempS3Bucket.Arn
+    DependsOn: 
+      - WhatshotFunction
+      - NewshoundFunction
+  NewshoundEventRule:
+    Type: AWS::Events::Rule
+    DependsOn: NewshoundFunction
+    Properties: 
+      Description: "Scheduled rule to trigger the newshound function"
+      ScheduleExpression: "rate(1 hour)"
+      Targets:
+      - Arn: !GetAtt NewshoundFunction.Arn
+        Id: !Ref NewshoundFunction
+        Input: !Join ['', ['{"newsApiKey": "',!Ref NewsApiKey,'", "news_items_tablename": "',!Ref NewsItemsTable,'", "news_url_tablename": "',!Ref NewsUrlTable,'", "run_history_tablename": "',!Ref RunHistoryTable,'"}']]
+  WhatsHotApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: Whats Hot in the new app
+      Name: whatshot
+    DependsOn: WhatshotFunction
+  WhatsHotApiResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      ParentId: !GetAtt WhatsHotApi.RootResourceId
+      PathPart: whatshot
+      RestApiId: !Ref WhatsHotApi
+  WhatsHotApiPutMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: GET
+        # The API version here (the date) is crucial
+        Uri: !Join [ "", ['arn:aws:apigateway:',!Ref 'AWS::Region',':lambda:path/','2015-03-31','/functions/',!GetAtt WhatshotFunction.Arn,'/invocations']]
+        IntegrationResponses:
+        - StatusCode: 200
+      ResourceId: !Ref WhatsHotApiResource
+      RestApiId: !Ref WhatsHotApi
+      MethodResponses:  
+      - StatusCode: 200
+    DependsOn: WhatsHotApiLambaPermission
+  WhatsHotApiEndpoint:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      Description: First Deployment
+      RestApiId: !Ref WhatsHotApi
+      StageName: v1
+    DependsOn: 
+    - WhatsHotApiPutMethod
+    - WhatsHotApiResource
+    - WhatsHotApi
+  WhatsHotApiLambaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref WhatshotFunction
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join [ '', ['arn:aws:execute-api:',!Ref 'AWS::Region',':',!Ref 'AWS::AccountId',':',!Ref WhatsHotApi,'/*/POST/*' ]]
+    DependsOn: WhatsHotApi
